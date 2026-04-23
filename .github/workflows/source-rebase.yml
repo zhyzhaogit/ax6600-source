@@ -1,0 +1,128 @@
+﻿name: Source Rebase
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: "Upstream repository in owner/name form"
+        required: false
+        default: "ones20250/immortalwrt_ipq"
+      upstream_branch:
+        description: "Upstream branch to track"
+        required: false
+        default: "main"
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve upstream
+        env:
+          INPUT_UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          INPUT_UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+        run: |
+          UPSTREAM_REPO="${INPUT_UPSTREAM_REPO:-ones20250/immortalwrt_ipq}"
+          UPSTREAM_BRANCH="${INPUT_UPSTREAM_BRANCH:-main}"
+          echo "UPSTREAM_REPO=${UPSTREAM_REPO}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_BRANCH=${UPSTREAM_BRANCH}" >> "$GITHUB_ENV"
+
+      - name: Prepare integration branch
+        run: |
+          git fetch origin "+refs/heads/*:refs/remotes/origin/*"
+          if git show-ref --verify --quiet refs/heads/ax6600-dev; then
+            git checkout ax6600-dev
+          elif git show-ref --verify --quiet refs/remotes/origin/ax6600-dev; then
+            git checkout -B ax6600-dev origin/ax6600-dev
+          else
+            git checkout -B ax6600-dev
+          fi
+
+      - name: Add upstream remote
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}"
+
+      - name: Rebase integration branch
+        id: rebase
+        run: |
+          mkdir -p reports
+          UPSTREAM_SHA="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          BRANCH_NAME="sync/${UPSTREAM_BRANCH}-${UPSTREAM_SHA:0:12}"
+          git checkout -B "${BRANCH_NAME}" ax6600-dev
+          {
+            echo "# Source Rebase Report"
+            echo
+            echo "- upstream repo: \`${UPSTREAM_REPO}\`"
+            echo "- upstream branch: \`${UPSTREAM_BRANCH}\`"
+            echo "- upstream sha: \`${UPSTREAM_SHA}\`"
+            echo "- base branch: \`ax6600-dev\`"
+            echo
+          } > reports/source-rebase.md
+          if git rebase "upstream/${UPSTREAM_BRANCH}"; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Result"
+              echo
+              echo "Rebase completed cleanly."
+            } >> reports/source-rebase.md
+          else
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Result"
+              echo
+              echo "Rebase hit conflicts."
+              echo
+              echo "### Conflicting files"
+              git diff --name-only --diff-filter=U | sed 's/^/- /'
+            } >> reports/source-rebase.md
+            git rebase --abort
+          fi
+
+      - name: Commit report branch
+        if: steps.rebase.outputs.status == 'success'
+        run: |
+          git add reports/source-rebase.md
+          git commit -m "Track upstream source movement for AX6600"
+          git push --force-with-lease origin "${{ steps.rebase.outputs.branch_name }}"
+
+      - name: Create pull request
+        if: steps.rebase.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr list --head "${{ steps.rebase.outputs.branch_name }}" --json number --jq 'length > 0' | grep -q true; then
+            echo "PR already exists for ${{ steps.rebase.outputs.branch_name }}."
+          else
+            gh pr create \
+              --base ax6600-dev \
+              --head "${{ steps.rebase.outputs.branch_name }}" \
+              --title "source: rebase onto ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}" \
+              --body $'This PR was created automatically after a clean upstream rebase attempt.\n\nReview the updated branch before promoting it to `ax6600-stable`.\n\nAttached report: `reports/source-rebase.md`'
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-rebase-report
+          path: reports/source-rebase.md

@@ -1,4 +1,4 @@
-﻿name: Source Rebase
+name: Source Rebase
 
 on:
   workflow_dispatch:
@@ -73,7 +73,7 @@ jobs:
             echo "- upstream repo: \`${UPSTREAM_REPO}\`"
             echo "- upstream branch: \`${UPSTREAM_BRANCH}\`"
             echo "- upstream sha: \`${UPSTREAM_SHA}\`"
-            echo "- base branch: \`ax6600-dev\`"
+            echo "- base branch: \`ax6600-dev\``
             echo
           } > reports/source-rebase.md
           if git rebase "upstream/${UPSTREAM_BRANCH}"; then
@@ -108,7 +108,7 @@ jobs:
       - name: Create pull request
         if: steps.rebase.outputs.status == 'success'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh pr list --head "${{ steps.rebase.outputs.branch_name }}" --json number --jq 'length > 0' | grep -q true; then
             echo "PR already exists for ${{ steps.rebase.outputs.branch_name }}."
@@ -117,7 +117,11 @@ jobs:
               --base ax6600-dev \
               --head "${{ steps.rebase.outputs.branch_name }}" \
               --title "source: rebase onto ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}" \
-              --body $'This PR was created automatically after a clean upstream rebase attempt.\n\nReview the updated branch before promoting it to `ax6600-stable`.\n\nAttached report: `reports/source-rebase.md`'
+              --body "This PR was created automatically after a clean upstream rebase attempt.
+
+Review the updated branch before promoting it to \`ax6600-stable\`.
+
+Attached report: \`reports/source-rebase.md\`"
           fi
 
       - name: Upload report

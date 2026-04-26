@@ -73,7 +73,7 @@ jobs:
             echo "- upstream repo: \`${UPSTREAM_REPO}\`"
             echo "- upstream branch: \`${UPSTREAM_BRANCH}\`"
             echo "- upstream sha: \`${UPSTREAM_SHA}\`"
-            echo "- base branch: \`ax6600-dev\``
+            echo "- base branch: \`ax6600-dev\`"
             echo
           } > reports/source-rebase.md
           if git rebase "upstream/${UPSTREAM_BRANCH}"; then

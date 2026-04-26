@@ -105,23 +105,40 @@ jobs:
           git commit -m "Track upstream source movement for AX6600"
           git push --force-with-lease origin "${{ steps.rebase.outputs.branch_name }}"
 
-      - name: Create pull request
+      - name: Create pull request if permitted
         if: steps.rebase.outputs.status == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
           if gh pr list --head "${{ steps.rebase.outputs.branch_name }}" --json number --jq 'length > 0' | grep -q true; then
             echo "PR already exists for ${{ steps.rebase.outputs.branch_name }}."
           else
+            cat > /tmp/source-rebase-pr-body.md <<'PR_BODY'
+          This PR was created automatically after a clean upstream rebase attempt.
+
+          Review the updated branch before promoting it to `ax6600-stable`.
+
+          Attached report: `reports/source-rebase.md`
+          PR_BODY
             gh pr create \
               --base ax6600-dev \
               --head "${{ steps.rebase.outputs.branch_name }}" \
               --title "source: rebase onto ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}" \
-              --body "This PR was created automatically after a clean upstream rebase attempt.
-
-Review the updated branch before promoting it to \`ax6600-stable\`.
-
-Attached report: \`reports/source-rebase.md\`"
+              --body-file /tmp/source-rebase-pr-body.md
+            pr_status=$?
+            if [ "${pr_status}" -ne 0 ]; then
+              echo "GitHub token could not create the pull request automatically."
+              echo "Open it manually from: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${{ steps.rebase.outputs.branch_name }}"
+              {
+                echo
+                echo "## Pull Request"
+                echo
+                echo "Automatic PR creation was not permitted for this workflow token."
+                echo
+                echo "Manual PR URL: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${{ steps.rebase.outputs.branch_name }}"
+              } >> reports/source-rebase.md
+            fi
           fi
 
       - name: Upload report

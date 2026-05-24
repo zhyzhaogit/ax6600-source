@@ -1,0 +1,17 @@
+--- a/src/init/ssdk_init.c
++++ b/src/init/ssdk_init.c
+@@ -1570,8 +1570,13 @@ static int ssdk_switch_unregister(a_uint
+ #if IS_ENABLED(CONFIG_NET_DSA)
+ 	if (priv->version == QCA_VER_MHT ||
+ 		priv->version == QCA_VER_AR8337 ||
+-		priv->version == QCA_VER_AR8327)
++		priv->version == QCA_VER_AR8327) {
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0))
+ 		unregister_dsa_blocking_notifier(&ssdk_dsa_notifier_nb);
++#else
++		ssdk_dsa_phylink_notifier_unregister();
++#endif
++	}
+ #endif
+ 
+ 	return 0;

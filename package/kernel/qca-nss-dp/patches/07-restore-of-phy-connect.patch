@@ -24,7 +24,7 @@
  		/* Notify data plane link is up */
  		if (dp_priv->data_plane_ops->link_state(dp_priv->dpc, 1)) {
  			netdev_dbg(netdev, "Data plane set link failed\n");
-@@ -724,6 +724,22 @@ static int32_t nss_dp_of_get_pdata(struc
+@@ -638,6 +638,22 @@ static int32_t nss_dp_of_get_pdata(struc
  	hal_pdata->netdev = netdev;
  	hal_pdata->macid = dp_priv->macid;
  
@@ -47,7 +47,7 @@
  #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0))
  	dp_priv->phy_mii_type = of_get_phy_mode(np);
  #else
-@@ -731,18 +747,6 @@ static int32_t nss_dp_of_get_pdata(struc
+@@ -645,18 +661,6 @@ static int32_t nss_dp_of_get_pdata(struc
  		return -EFAULT;
  #endif
  
@@ -66,7 +66,7 @@
  	of_property_read_u32(np, "qcom,forced-speed", &dp_priv->forced_speed);
  	of_property_read_u32(np, "qcom,forced-duplex", &dp_priv->forced_duplex);
  
-@@ -835,69 +839,6 @@ static int32_t nss_dp_of_get_pdata(struc
+@@ -749,69 +753,6 @@ static int32_t nss_dp_of_get_pdata(struc
  	return 0;
  }
  
@@ -136,7 +136,7 @@
  #ifdef CONFIG_NET_SWITCHDEV
  /*
   * nss_dp_is_phy_dev()
-@@ -955,19 +896,27 @@ static int32_t nss_dp_probe(struct platf
+@@ -869,19 +810,27 @@ static int32_t nss_dp_probe(struct platf
  	struct nss_dp_dev *dp_priv;
  	struct device_node *np = pdev->dev.of_node;
  	struct nss_gmac_hal_platform_data gmac_hal_pdata;
@@ -168,7 +168,7 @@
  		return -ENOMEM;
  	}
  
-@@ -1037,22 +986,15 @@ static int32_t nss_dp_probe(struct platf
+@@ -951,22 +900,15 @@ static int32_t nss_dp_probe(struct platf
  
  	dp_priv->drv_flags |= NSS_DP_PRIV_FLAG(INIT_DONE);
  

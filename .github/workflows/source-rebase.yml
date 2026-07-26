@@ -18,13 +18,18 @@ permissions:
   contents: write
   pull-requests: write
 
+# Candidate branches are force-updated, so serialize all runs that can publish them.
+concurrency:
+  group: source-rebase-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   rebase:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -33,117 +38,306 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Resolve upstream
+      - name: Resolve upstream and candidate branch
         env:
           INPUT_UPSTREAM_REPO: ${{ inputs.upstream_repo }}
           INPUT_UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
         run: |
-          UPSTREAM_REPO="${INPUT_UPSTREAM_REPO:-ones20250/immortalwrt_ipq}"
-          UPSTREAM_BRANCH="${INPUT_UPSTREAM_BRANCH:-main}"
-          echo "UPSTREAM_REPO=${UPSTREAM_REPO}" >> "$GITHUB_ENV"
-          echo "UPSTREAM_BRANCH=${UPSTREAM_BRANCH}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          upstream_repo="${INPUT_UPSTREAM_REPO:-ones20250/immortalwrt_ipq}"
+          upstream_branch="${INPUT_UPSTREAM_BRANCH:-main}"
 
-      - name: Prepare integration branch
-        run: |
-          git fetch origin "+refs/heads/*:refs/remotes/origin/*"
-          if git show-ref --verify --quiet refs/heads/ax6600-dev; then
-            git checkout ax6600-dev
-          elif git show-ref --verify --quiet refs/remotes/origin/ax6600-dev; then
-            git checkout -B ax6600-dev origin/ax6600-dev
-          else
-            git checkout -B ax6600-dev
+          {
+            echo "VALIDATION_STATUS=incomplete"
+            echo "VALIDATION_REASON=upstream_input_not_resolved"
+            echo "PUBLISH_STATUS=not_attempted"
+            echo "PUBLISH_REASON=validation_not_complete"
+            echo "REVIEW_STATUS=not_attempted"
+            echo "REVIEW_REASON=candidate_not_published"
+            echo "PR_URL="
+          } >> "${GITHUB_ENV}"
+
+          if ! [[ "${upstream_repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "VALIDATION_REASON=invalid_upstream_repository" >> "${GITHUB_ENV}"
+            echo "Invalid upstream repository: ${upstream_repo}" >&2
+            exit 1
+          fi
+          if ! git check-ref-format --branch "${upstream_branch}" >/dev/null; then
+            echo "VALIDATION_REASON=invalid_upstream_branch" >> "${GITHUB_ENV}"
+            echo "Invalid upstream branch: ${upstream_branch}" >&2
+            exit 1
           fi
 
-      - name: Add upstream remote
-        run: |
-          git remote remove upstream 2>/dev/null || true
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch upstream "${UPSTREAM_BRANCH}"
+          # The deterministic key gives each repository/branch pair one reusable
+          # candidate branch without embedding an ever-changing upstream SHA.
+          normalized_repo="$(printf '%s' "${upstream_repo}" | tr '[:upper:]' '[:lower:]')"
+          candidate_key="$(printf '%s' "${normalized_repo}@${upstream_branch}" | sha256sum | cut -c1-16)"
+          candidate_branch="sync/upstream-${candidate_key}"
 
-      - name: Rebase integration branch
-        id: rebase
-        run: |
+          {
+            echo "UPSTREAM_REPO=${upstream_repo}"
+            echo "UPSTREAM_BRANCH=${upstream_branch}"
+            echo "CANDIDATE_BRANCH=${candidate_branch}"
+            echo "VALIDATION_STATUS=not_run"
+            echo "VALIDATION_REASON=not_run"
+            echo "MANUAL_PR_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/ax6600-dev...${candidate_branch}?expand=1"
+          } >> "${GITHUB_ENV}"
+
           mkdir -p reports
-          UPSTREAM_SHA="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
-          BRANCH_NAME="sync/${UPSTREAM_BRANCH}-${UPSTREAM_SHA:0:12}"
-          git checkout -B "${BRANCH_NAME}" ax6600-dev
           {
             echo "# Source Rebase Report"
             echo
-            echo "- upstream repo: \`${UPSTREAM_REPO}\`"
-            echo "- upstream branch: \`${UPSTREAM_BRANCH}\`"
-            echo "- upstream sha: \`${UPSTREAM_SHA}\`"
+            echo "- upstream repo: \`${upstream_repo}\`"
+            echo "- upstream branch: \`${upstream_branch}\`"
+            echo "- reusable candidate branch: \`${candidate_branch}\`"
             echo "- base branch: \`ax6600-dev\`"
-            echo
           } > reports/source-rebase.md
-          if git rebase "upstream/${UPSTREAM_BRANCH}"; then
-            echo "status=success" >> "$GITHUB_OUTPUT"
-            echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare integration branch
+        run: |
+          set -euo pipefail
+          if ! git fetch origin "+refs/heads/*:refs/remotes/origin/*"; then
+            echo "VALIDATION_STATUS=incomplete" >> "${GITHUB_ENV}"
+            echo "VALIDATION_REASON=origin_fetch_failed" >> "${GITHUB_ENV}"
+            exit 1
+          fi
+          if git show-ref --verify --quiet refs/remotes/origin/ax6600-dev; then
+            git checkout -B ax6600-dev origin/ax6600-dev
+          elif git show-ref --verify --quiet refs/heads/ax6600-dev; then
+            git checkout ax6600-dev
+          else
+            echo "VALIDATION_STATUS=incomplete" >> "${GITHUB_ENV}"
+            echo "VALIDATION_REASON=integration_branch_missing" >> "${GITHUB_ENV}"
+            echo "Required integration branch ax6600-dev does not exist." >&2
+            exit 1
+          fi
+          echo "INTEGRATION_BASE_SHA=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          if ! git fetch --no-tags upstream "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/tracked"; then
+            echo "VALIDATION_STATUS=incomplete" >> "${GITHUB_ENV}"
+            echo "VALIDATION_REASON=upstream_fetch_failed" >> "${GITHUB_ENV}"
+            exit 1
+          fi
+          echo "UPSTREAM_SHA=$(git rev-parse refs/remotes/upstream/tracked)" >> "${GITHUB_ENV}"
+
+      - name: Rebase candidate
+        id: rebase
+        run: |
+          set -euo pipefail
+          git checkout -B "${CANDIDATE_BRANCH}" ax6600-dev
+          if git rebase refs/remotes/upstream/tracked; then
+            integration_sha="$(git rev-parse HEAD)"
             {
-              echo "## Result"
+              echo "VALIDATION_STATUS=success"
+              echo "VALIDATION_REASON=clean_rebase"
+              echo "INTEGRATION_SHA=${integration_sha}"
+            } >> "${GITHUB_ENV}"
+            {
               echo
-              echo "Rebase completed cleanly."
+              echo "## Validation"
+              echo
+              echo "Rebase completed cleanly at \`${integration_sha}\`."
             } >> reports/source-rebase.md
           else
-            echo "status=conflict" >> "$GITHUB_OUTPUT"
-            echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+            conflicts="$(git diff --name-only --diff-filter=U | paste -sd, -)"
             {
-              echo "## Result"
+              echo "VALIDATION_STATUS=conflict"
+              echo "VALIDATION_REASON=rebase_conflict"
+              echo "INTEGRATION_SHA="
+            } >> "${GITHUB_ENV}"
+            {
               echo
-              echo "Rebase hit conflicts."
+              echo "## Validation"
               echo
-              echo "### Conflicting files"
-              git diff --name-only --diff-filter=U | sed 's/^/- /'
+              echo "Rebase hit conflicts. The candidate was not published."
+              echo
+              echo "Conflicting files: \`${conflicts:-unknown}\`"
             } >> reports/source-rebase.md
             git rebase --abort
           fi
 
-      - name: Commit report branch
-        if: steps.rebase.outputs.status == 'success'
+      - name: Publish reusable candidate branch
+        if: env.VALIDATION_STATUS == 'success'
         run: |
-          git add reports/source-rebase.md
-          git commit -m "Track upstream source movement for AX6600"
-          git push --force-with-lease origin "${{ steps.rebase.outputs.branch_name }}"
+          set +e
+          push_output="$(git push --force-with-lease origin "${CANDIDATE_BRANCH}" 2>&1)"
+          push_status=$?
+          set -e
+          if [ "${push_status}" -eq 0 ]; then
+            {
+              echo "PUBLISH_STATUS=published"
+              echo "PUBLISH_REASON=candidate_branch_updated"
+            } >> "${GITHUB_ENV}"
+            echo "${push_output}"
+          else
+            {
+              echo "PUBLISH_STATUS=incomplete"
+              echo "PUBLISH_REASON=candidate_branch_push_failed"
+              echo "REVIEW_STATUS=incomplete"
+              echo "REVIEW_REASON=candidate_branch_push_failed"
+            } >> "${GITHUB_ENV}"
+            {
+              echo
+              echo "## Publication"
+              echo
+              echo "Candidate branch publication failed; no reviewable PR can be guaranteed."
+            } >> reports/source-rebase.md
+            echo "${push_output}" >&2
+          fi
 
-      - name: Create pull request if permitted
-        if: steps.rebase.outputs.status == 'success'
+      - name: Ensure reviewable pull request
+        if: env.VALIDATION_STATUS == 'success' && env.PUBLISH_STATUS == 'published'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          if gh pr list --head "${{ steps.rebase.outputs.branch_name }}" --json number --jq 'length > 0' | grep -q true; then
-            echo "PR already exists for ${{ steps.rebase.outputs.branch_name }}."
+          existing_url="$(gh pr list \
+            --head "${CANDIDATE_BRANCH}" \
+            --base ax6600-dev \
+            --state open \
+            --json url \
+            --jq '.[0].url // empty' 2>reports/pr-error.log)"
+          list_status=$?
+          set -e
+
+          if [ "${list_status}" -ne 0 ]; then
+            review_status="incomplete"
+            review_reason="pull_request_lookup_failed"
+            pr_url=""
+          elif [ -n "${existing_url}" ]; then
+            review_status="ready"
+            review_reason="open_pull_request_reused"
+            pr_url="${existing_url}"
           else
-            cat > /tmp/source-rebase-pr-body.md <<'PR_BODY'
-          This PR was created automatically after a clean upstream rebase attempt.
-
-          Review the updated branch before promoting it to `ax6600-stable`.
-
-          Attached report: `reports/source-rebase.md`
-          PR_BODY
-            gh pr create \
+            printf '%s\n' \
+              'This PR was created automatically after a clean upstream rebase attempt.' \
+              '' \
+              'Review and run the firmware validation gates before any human-approved promotion.' \
+              'This workflow does not update `ax6600-stable`.' \
+              > /tmp/source-rebase-pr-body.md
+            set +e
+            pr_url="$(gh pr create \
               --base ax6600-dev \
-              --head "${{ steps.rebase.outputs.branch_name }}" \
+              --head "${CANDIDATE_BRANCH}" \
               --title "source: rebase onto ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}" \
-              --body-file /tmp/source-rebase-pr-body.md
-            pr_status=$?
-            if [ "${pr_status}" -ne 0 ]; then
-              echo "GitHub token could not create the pull request automatically."
-              echo "Open it manually from: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${{ steps.rebase.outputs.branch_name }}"
-              {
-                echo
-                echo "## Pull Request"
-                echo
-                echo "Automatic PR creation was not permitted for this workflow token."
-                echo
-                echo "Manual PR URL: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${{ steps.rebase.outputs.branch_name }}"
-              } >> reports/source-rebase.md
+              --body-file /tmp/source-rebase-pr-body.md 2>reports/pr-error.log)"
+            create_status=$?
+            set -e
+            if [ "${create_status}" -eq 0 ] && [ -n "${pr_url}" ]; then
+              review_status="ready"
+              review_reason="pull_request_created"
+            else
+              review_status="incomplete"
+              review_reason="pull_request_creation_failed"
+              pr_url=""
             fi
           fi
 
-      - name: Upload report
+          {
+            echo "REVIEW_STATUS=${review_status}"
+            echo "REVIEW_REASON=${review_reason}"
+            echo "PR_URL=${pr_url}"
+          } >> "${GITHUB_ENV}"
+
+          {
+            echo
+            echo "## Review lane"
+            echo
+            echo "- status: \`${review_status}\`"
+            echo "- reason: \`${review_reason}\`"
+            if [ -n "${pr_url}" ]; then
+              echo "- pull request: ${pr_url}"
+            else
+              echo "- pull request: not created"
+              echo "- manual creation URL: ${MANUAL_PR_URL}"
+            fi
+          } >> reports/source-rebase.md
+
+      - name: Write candidate metadata
         if: always()
-        uses: actions/upload-artifact@v4
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          jq -n \
+            --arg upstream_repo "${UPSTREAM_REPO:-}" \
+            --arg upstream_branch "${UPSTREAM_BRANCH:-}" \
+            --arg upstream_sha "${UPSTREAM_SHA:-}" \
+            --arg integration_base_sha "${INTEGRATION_BASE_SHA:-}" \
+            --arg candidate_branch "${CANDIDATE_BRANCH:-}" \
+            --arg integration_sha "${INTEGRATION_SHA:-}" \
+            --arg validation_status "${VALIDATION_STATUS:-incomplete}" \
+            --arg validation_reason "${VALIDATION_REASON:-workflow_step_failed}" \
+            --arg publish_status "${PUBLISH_STATUS:-incomplete}" \
+            --arg publish_reason "${PUBLISH_REASON:-workflow_step_failed}" \
+            --arg review_status "${REVIEW_STATUS:-incomplete}" \
+            --arg review_reason "${REVIEW_REASON:-workflow_step_failed}" \
+            --arg pr_url "${PR_URL:-}" \
+            --arg manual_pr_url "${MANUAL_PR_URL:-}" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg generated_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{
+              schema_version: 1,
+              upstream: {
+                repository: $upstream_repo,
+                branch: $upstream_branch,
+                sha: $upstream_sha
+              },
+              candidate: {
+                branch: $candidate_branch,
+                integration_base_sha: $integration_base_sha,
+                integration_sha: $integration_sha
+              },
+              validation: {
+                status: $validation_status,
+                reason: $validation_reason
+              },
+              publication: {
+                status: $publish_status,
+                reason: $publish_reason
+              },
+              review: {
+                status: $review_status,
+                reason: $review_reason,
+                pr_url: $pr_url,
+                manual_pr_url: $manual_pr_url
+              },
+              run: {
+                url: $run_url,
+                generated_at: $generated_at
+              }
+            }' > reports/source-rebase.json
+
+      - name: Upload candidate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: source-rebase-report
-          path: reports/source-rebase.md
+          name: source-rebase-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reports/source-rebase.md
+            reports/source-rebase.json
+            reports/pr-error.log
+          if-no-files-found: error
+
+      - name: Enforce complete review lane
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${VALIDATION_STATUS:-incomplete}" != "success" ]; then
+            echo "Source validation incomplete: ${VALIDATION_REASON:-workflow_step_failed}" >&2
+            exit 1
+          fi
+          if [ "${PUBLISH_STATUS:-incomplete}" != "published" ]; then
+            echo "Candidate publication incomplete: ${PUBLISH_REASON:-workflow_step_failed}" >&2
+            exit 1
+          fi
+          if [ "${REVIEW_STATUS:-incomplete}" != "ready" ]; then
+            echo "Review lane incomplete: ${REVIEW_REASON:-workflow_step_failed}" >&2
+            echo "Manual PR URL: ${MANUAL_PR_URL:-unavailable}" >&2
+            exit 1
+          fi
+          echo "Candidate ${CANDIDATE_BRANCH} is reviewable at ${PR_URL}."
